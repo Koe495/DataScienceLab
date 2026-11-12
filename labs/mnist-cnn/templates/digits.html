@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="vi">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nhận diện chữ số viết tay</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #f1f5f4; color: #10231e; font: 16px Inter, system-ui, sans-serif; }
+  main { width: min(94%, 750px); margin: 8vh auto; }
+  h1 { font-size: clamp(1.8rem, 4.5vw, 2.6rem); line-height: 1.12; margin: 0; }
+  .grid { display: grid; grid-template-columns: minmax(0, 320px) 1fr; gap: 28px; align-items: start; }
+  canvas { display: block; width: 100%; height: auto; background: #000; border-radius: 14px; touch-action: none; }
+  .controls { display: flex; gap: 12px; margin-top: 14px; }
+  button { font: inherit; font-weight: 600; padding: 10px 14px; border: 1px solid #17624e; border-radius: 8px; cursor: pointer; }
+  button:disabled { opacity: 0.6; cursor: wait; }
+  #predict { background: #17624e; color: white; }
+  #clear { background: transparent; color: #17624e; }
+  #result { background: #fff; border-radius: 14px; padding: 20px; }
+  #status { margin: 0; }
+  ol { padding: 0; list-style: none; margin-bottom: 0; }
+  li { display: grid; grid-template-columns: 1rem 1fr 4.5rem; gap: 10px; align-items: center; margin: 8px 0; }
+  progress { width: 100%; accent-color: #17624e; }
+  .score { text-align: right; font-variant-numeric: tabular-nums; }
+  @media (max-width: 620px) { main { margin: 5vh auto; } .grid { grid-template-columns: 1fr; } }
+</style>
+<main>
+  <h1>Nhận diện chữ số viết tay</h1>
+  <p>Vẽ một chữ số từ 0 đến 9 rồi chọn Dự đoán.</p>
+  <div class="grid">
+    <div>
+      <canvas id="canvas" width="320" height="320" aria-label="Vùng vẽ chữ số"></canvas>
+      <div class="controls">
+        <button id="predict" type="button">Dự đoán</button>
+        <button id="clear" type="button">Xóa</button>
+      </div>
+    </div>
+    <section id="result" aria-label="Kết quả dự đoán">
+      <p id="status" role="status">Chưa có kết quả.</p>
+      <ol id="probabilities" aria-label="Xác suất theo chữ số" hidden></ol>
+    </section>
+  </div>
+</main>
+<script>
+  const canvas = document.querySelector('#canvas');
+  const ctx = canvas.getContext('2d');
+  const predict = document.querySelector('#predict');
+  const clear = document.querySelector('#clear');
+  const status = document.querySelector('#status');
+  const scores = document.querySelector('#probabilities');
+  let pointer = null;
+  let hasInk = false;
+  let revision = 0;
+
+  function reset() {
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    hasInk = false;
+    revision += 1;
+    status.textContent = 'Chưa có kết quả.';
+    scores.hidden = true;
+    scores.replaceChildren();
+  }
+
+  function position(event) {
+    const rect = canvas.getBoundingClientRect();
+    return [(event.clientX - rect.left) * canvas.width / rect.width,
+            (event.clientY - rect.top) * canvas.height / rect.height];
+  }
+
+  canvas.addEventListener('pointerdown', event => {
+    if (pointer !== null || event.button !== 0) return;
+    pointer = event.pointerId;
+    canvas.setPointerCapture(pointer);
+    const [x, y] = position(event);
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(x, y, 8, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    hasInk = true;
+    revision += 1;
+    status.textContent = 'Sẵn sàng dự đoán.';
+    scores.hidden = true;
+  });
+
+  canvas.addEventListener('pointermove', event => {
+    if (event.pointerId !== pointer) return;
+    const [x, y] = position(event);
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 16;
+    ctx.lineCap = 'round';
+    ctx.lineTo(x, y);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    revision += 1;
+  });
+
+  for (const eventName of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+    canvas.addEventListener(eventName, event => {
+      if (event.pointerId === pointer) pointer = null;
+    });
+  }
+
+  clear.addEventListener('click', reset);
+  predict.addEventListener('click', async () => {
+    if (!hasInk) {
+      status.textContent = 'Hãy vẽ một chữ số trước khi dự đoán.';
+      return;
+    }
+    const requestRevision = revision;
+    predict.disabled = true;
+    scores.hidden = true;
+    status.textContent = 'Đang dự đoán…';
+    try {
+      const response = await fetch('{{ url_for("predict") }}', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: canvas.toDataURL('image/png') }),
+      });
+      const result = await response.json();
+      if (requestRevision !== revision) return;
+      if (!response.ok) throw new Error(result.error || 'Không thể dự đoán.');
+      status.textContent = `Dự đoán: ${result.prediction} · ${result.confidence.toFixed(2)}%`;
+      scores.replaceChildren();
+      result.probabilities.forEach((value, digit) => {
+        const row = document.createElement('li');
+        const label = document.createElement('span');
+        label.textContent = digit;
+        const bar = document.createElement('progress');
+        bar.max = 100;
+        bar.value = value;
+        bar.setAttribute('aria-label', `Chữ số ${digit}`);
+        const percent = document.createElement('span');
+        percent.className = 'score';
+        percent.textContent = `${value.toFixed(2)}%`;
+        row.append(label, bar, percent);
+        scores.append(row);
+      });
+      scores.hidden = false;
+    } catch (error) {
+      if (requestRevision === revision) status.textContent = error.message;
+    } finally {
+      predict.disabled = false;
+    }
+  });
+  reset();
+</script>
+</html>
